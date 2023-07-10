@@ -21,6 +21,13 @@ def unsigned_to_signed(x):
 def signed_to_unsigned(x):
     return x if x >= 0 else x + (2 ** 256)
 
+def invalid_position(code, pc):
+    for i in range(1, 33):
+        if pc < i:
+            break
+        if code[pc - i] == evm_codes.PUSH0 + i:
+            return True
+    return False
 
 def evm(code):
     pc = 0
@@ -135,6 +142,27 @@ def evm(code):
                 else:
                     num = stack[1] >> stack[0]
                 stack = [num] + stack[2:]
+            case evm_codes.JUMP:
+                pc = stack[0]
+                stack = stack[1:]
+                if code[pc] != evm_codes.JUMPDEST or invalid_position(code, pc):
+                    success = False
+                    break
+            case evm_codes.JUMPI:
+                if stack[1] != 0:
+                    pc = stack[0]
+                    stack = stack[2:]
+                    if code[pc] != evm_codes.JUMPDEST or invalid_position(code, pc):
+                        success = False
+                        break
+                else:
+                    stack = stack[2:]
+            case evm_codes.PC:
+                stack = [pc - 1] + stack
+            case evm_codes.GAS:
+                stack = [0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff] + stack
+            case evm_codes.JUMPDEST:
+                continue
             case evm_codes.PUSH0:
                 stack.append(0)
             case x if x in range(evm_codes.PUSH1, evm_codes.PUSH32+1):
@@ -142,8 +170,15 @@ def evm(code):
                 b = int(code[pc:pc + length].hex(), 16)
                 pc += length
                 stack = [b] + stack
-            case x if x in range(evm_codes.DUP1, evm_codes.DUP32+1):
+            case x if x in range(evm_codes.DUP1, evm_codes.DUP16+1):
                 stack = [stack[x - evm_codes.DUP1]] + stack
+            case x if x in range(evm_codes.SWAP1, evm_codes.SWAP16+1):
+                n = x - evm_codes.SWAP1 + 1
+                stack[0], stack[n] = stack[n], stack[0]
+            case evm_codes.INVALID:
+                success = False
+                break
+
 
 
                 

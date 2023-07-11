@@ -7,7 +7,8 @@ Welcome to **EVM From Scratch**! It's a 100% practical course that will help you
 
 ## Fork Declaration
 Finished python version by y1cunhui.eth. Still so many problems(no gas computation, no address computation, no create2, few exception handling...), just enough to past all the testcases.
-A reference for who have problems finish this practice in python. 
+
+A reference for those who have problems finish this practice in python. 
 
 ## Getting Started
 

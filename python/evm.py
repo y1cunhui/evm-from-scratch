@@ -15,6 +15,7 @@ import os
 from eth_hash.auto import keccak
 import evm_codes
 
+state = None
 # helper functions
 def mload(memory, offset, size):
     val = 0
@@ -45,13 +46,13 @@ def invalid_position(code, pc):
             return True
     return False
 
-def evm(code, tx, block, state):
+def evm(code, tx, block, storage):
+    global state
     pc = 0
     success = True
     stack = []
     memory = []
     log = []
-    storage = dict()
     ret = None
     lastRet = None
     
@@ -170,8 +171,8 @@ def evm(code, tx, block, state):
                 stack = [int(tx['to'], 16)] + stack
             case evm_codes.BALANCE:
                 addr = hex(stack[0])
-                if len(addr) < 22:
-                    addr = '0x' + '0'*(22 - len(addr)) + addr[2:]
+                if len(addr) < 42:
+                    addr = '0x' + '0'*(42 - len(addr)) + addr[2:]
                 if state is None or addr not in state or 'balance' not in state[addr]:
                     stack[0] = 0
                 else:
@@ -224,16 +225,16 @@ def evm(code, tx, block, state):
                 stack = [int(tx['gasprice'], 16)] + stack
             case evm_codes.EXTCODESIZE:
                 addr = hex(stack[0])
-                if len(addr) < 22:
-                    addr = '0x' + '0'*(22 - len(addr)) + addr[2:]
+                if len(addr) < 42:
+                    addr = '0x' + '0'*(42 - len(addr)) + addr[2:]
                 if state is None or addr not in state or 'code' not in state[addr]:
                     stack[0] = 0
                 else:
                     stack[0] = len(state[addr]['code']['bin']) / 2
             case evm_codes.EXTCODECOPY:
                 addr, destoffset, offset, size = hex(stack[0]), stack[1], stack[2], stack[3]
-                if len(addr) < 22:
-                    addr = '0x' + '0'*(22 - len(addr)) + addr[2:]
+                if len(addr) < 42:
+                    addr = '0x' + '0'*(42 - len(addr)) + addr[2:]
                 if state is None or addr not in state or 'code' not in state[addr]:
                     extcode = b''
                 else:
@@ -250,10 +251,15 @@ def evm(code, tx, block, state):
             case evm_codes.RETURNDATASIZE:
                 a = len(lastRet)/2 if lastRet else 0
                 stack = [a] + stack
+            case evm_codes.RETURNDATACOPY:
+                destOffset, offset, size = stack[0], stack[1], stack[2]
+                stack = stack[3:]
+                data = lastRet[offset * 2: (offset + size) * 2]
+                mstore(memory, int(data, 16), destOffset, size)
             case evm_codes.EXTCODEHASH:
                 addr = hex(stack[0])
-                if len(addr) < 22:
-                    addr = '0x' + '0'*(22 - len(addr)) + addr[2:]
+                if len(addr) < 42:
+                    addr = '0x' + '0'*(42 - len(addr)) + addr[2:]
                 if state is None or addr not in state:
                     a = 0
                 elif 'code' not in state[addr]:
@@ -360,6 +366,32 @@ def evm(code, tx, block, state):
                     "data": data,
                     "topics": topics
                 })
+            case evm_codes.CREATE:
+                value, offset, size = stack[0], stack[1], stack[2]
+                addr = "0x00000000000000000000000000000000deadbeef"
+                c = mload(memory, offset, size)
+                #print(c)
+                if c != 0:
+                    succ, _, llog, rr, _ = evm(bytes.fromhex(hex(c)[2:]), {}, block, dict())
+                    if not succ:
+                        stack = [0] + stack[3:]
+                    else:
+                        stack = [int(addr, 16)] + stack[3:]
+                        if state is None:
+                            state = {}
+                        state[addr] = {
+                            'balance': hex(value),
+                            'code': {
+                                'bin': rr
+                            }
+                        }
+                else:
+                    stack = [int(addr, 16)] + stack[3:]
+                    if state is None:
+                        state = {}
+                    state[addr] = {
+                        'balance': hex(value),
+                    }
             case evm_codes.CALL:
                 gas, address, value, argsOffset, argsSize, retOffset, retSize = stack[0], stack[1], stack[2], stack[3], stack[4], stack[5], stack[6]
                 stack = stack[7:]
@@ -373,11 +405,12 @@ def evm(code, tx, block, state):
                     "origin": tx.get("origin") if tx else None,
                     "from": tx.get("to") if tx else None
                 }
-                succ, _, llog, rr = evm(bytes.fromhex(state[address]['code']['bin']), new_tx, block, state)
-                rr = rr[:retSize * 2]
+                succ, _, llog, rr, _ = evm(bytes.fromhex(state[address]['code']['bin']), new_tx, block, dict())
+                if rr:
+                    rr = rr[:retSize * 2]
+                    memory = mstore(memory, int(rr, 16), retOffset, retSize)
                 lastRet = rr
                 log += llog
-                memory = mstore(memory, int(rr, 16), retOffset, retSize)
                 
                 stack = [int(succ)] + stack
 
@@ -386,19 +419,70 @@ def evm(code, tx, block, state):
                 ret = val.rjust(stack[1]*2, '0')
                 stack = stack[2:]
                 break
+            case evm_codes.DELEGATECALL:
+                gas, address, argsOffset, argsSize, retOffset, retSize = stack[0], stack[1], stack[2], stack[3], stack[4], stack[5]
+                stack = stack[6:]
+                address = hex(address)
+                if len(address) < 22:
+                    address = '0x' + '0'*(22 - len(address)) + address[2:]
+                args = mload(memory, argsOffset, argsSize)
+                succ, _, llog, rr, storage = evm(bytes.fromhex(state[address]['code']['bin']), tx, block, storage)
+                lastRet = rr
+                log += llog
+                if rr:
+                    rr = rr[:retSize * 2]
+                    memory = mstore(memory, int(rr, 16), retOffset, retSize)
+                
+                stack = [int(succ)] + stack
+            case evm_codes.STATICCALL:
+                gas, address, argsOffset, argsSize, retOffset, retSize = stack[0], stack[1], stack[2], stack[3], stack[4], stack[5]
+                stack = stack[6:]
+                address = hex(address)
+                if len(address) < 22:
+                    address = '0x' + '0'*(22 - len(address)) + address[2:]
+                args = mload(memory, argsOffset, argsSize)
+                new_tx = {
+                    "to": address,
+                    "origin": tx.get("origin") if tx else None,
+                    "from": tx.get("to") if tx else None
+                }
+                succ, _, llog, rr, ss = evm(bytes.fromhex(state[address]['code']['bin']), new_tx, block, dict())
+                if ss != {}:
+                    succ = False
+                lastRet = rr
+                log += llog
+                if rr:
+                    rr = rr[:retSize * 2]
+                    memory = mstore(memory, int(rr, 16), retOffset, retSize)
+                
+                stack = [int(succ)] + stack
             case evm_codes.REVERT:
                 val = hex(mload(memory, stack[0], stack[1]))[2:]
                 ret = val.ljust(stack[1]*2, '0')
                 stack = stack[2:]
                 success = False
                 break
+            case evm_codes.SELFDESTRUCT:
+                addr = hex(stack[0])
+                if len(addr) < 42:
+                    addr = '0x' + '0'*(42 - len(addr)) + addr[2:]
+                stack = stack[1:]
+                del state[tx['to']]['code']
+                if addr not in state:
+                    state[addr] = {
+                        'balance': '0x0'
+                    }
+                balance = int(state[tx['to']]['balance'], 16)
+                state[tx['to']]['balance'] = '0x0'
+                state[addr]['balance'] = hex(int(state[addr]['balance'], 16) + balance)
             case _:
                 success = False
                 break
 
-    return (success, stack, log, ret)
+    return (success, stack, log, ret, storage)
 
 def test():
+    global state
     script_dirname = os.path.dirname(os.path.abspath(__file__))
     json_file = os.path.join(script_dirname, "..", "evm.json")
     with open(json_file) as f:
@@ -412,7 +496,7 @@ def test():
             tx = test.get('tx')
             block = test.get('block')
             state = test.get('state')
-            (success, stack, log, ret) = evm(code, tx, block, state)
+            (success, stack, log, ret, _) = evm(code, tx, block, dict())
 
             expected_stack = [int(x, 16) for x in test['expect'].get('stack', [])]
             expected_log = test['expect'].get('logs', [])

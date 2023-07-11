@@ -15,9 +15,22 @@ import os
 from eth_hash.auto import keccak
 import evm_codes
 
-
-
 # helper functions
+def mload(memory, offset, size):
+    val = 0
+    if len(memory) < offset + size:
+        memory += ([0] * (offset + size - len(memory)))
+    for i in range(size):
+        val <<= 8
+        val += memory[offset + i]
+    return val
+
+def mstore(memory, data, offset, size):
+    if len(memory) < offset + size:
+        memory += ([0] * (offset + size - len(memory)))
+    for i in range(size):
+        memory[offset + size - i - 1] = (data >> (i * 8)) & 0xFF
+    return memory
 def unsigned_to_signed(x):
     return x if x < (2 ** 255 - 1) else x - (2 ** 256)
 
@@ -39,6 +52,7 @@ def evm(code, tx, block, state):
     memory = []
     log = []
     storage = dict()
+    ret = None
     
     while pc < len(code):
         op = code[pc]
@@ -148,12 +162,7 @@ def evm(code, tx, block, state):
                 stack = [num] + stack[2:]
             case evm_codes.SHA3:
                 offset, size = stack[0], stack[1]
-                val = 0
-                if len(memory) < offset + size:
-                    memory += ([0] * (pos + 32 - len(memory)))
-                for i in range(size):
-                    val <<= 8
-                    val += memory[offset + i]
+                val = mload(memory, offset, size)
                 
                 stack = [int.from_bytes(keccak(val.to_bytes(size, byteorder='big')), byteorder='big')] + stack[2:]
             case evm_codes.ADDRESS:
@@ -276,14 +285,7 @@ def evm(code, tx, block, state):
                 stack = stack[1:]
             case evm_codes.MLOAD:
                 pos = stack[0]
-                val = 0
-                if len(memory) < pos + 32:
-                    memory += ([0] * (pos + 32 - len(memory)))
-                for i in range(32):
-                    val <<= 8
-                    val += memory[pos + i]
-                    
-                stack[0] = val
+                stack[0] = mload(memory, pos, 32)
             case evm_codes.MSTORE:
                 pos, val = stack[0], stack[1]
                 stack = stack[2:]
@@ -295,7 +297,7 @@ def evm(code, tx, block, state):
                 pos, val = stack[0], stack[1] & 0xFF
                 stack = stack[2:]
                 if len(memory) <= pos:
-                    memory += ([0] * (pos +1 - len(memory)))
+                    memory += ([0] * (pos + 1 - len(memory)))
                 memory[pos] = val
             case evm_codes.SLOAD:
                 k = stack[0]
@@ -354,17 +356,42 @@ def evm(code, tx, block, state):
                     "data": data,
                     "topics": topics
                 })
+            case evm_codes.CALL:
+                gas, address, value, argsOffset, argsSize, retOffset, retSize = stack[0], stack[1], stack[2], stack[3], stack[4], stack[5], stack[6]
+                stack = stack[7:]
+                address = hex(address)
+                if len(address) < 22:
+                    address = '0x' + '0'*(22 - len(address)) + address[2:]
+                args = mload(memory, argsOffset, argsSize)
+                new_tx = {
+                    "to": address,
+                    "value": value,
+                    "origin": tx.get("origin") if tx else None,
+                    "from": tx.get("to") if tx else None
+                }
+                succ, _, llog, rr = evm(bytes.fromhex(state[address]['code']['bin']), new_tx, block, state)
+                rr = rr[:retSize * 2]
+                log += llog
+                memory = mstore(memory, int(rr, 16), retOffset, retSize)
+                
+                stack = [int(succ)] + stack
+
+            case evm_codes.RETURN:
+                val = hex(mload(memory, stack[0], stack[1]))[2:]
+                ret = val.rjust(stack[1]*2, '0')
+                stack = stack[2:]
+                break
+            case evm_codes.REVERT:
+                val = hex(mload(memory, stack[0], stack[1]))[2:]
+                ret = val.ljust(stack[1]*2, '0')
+                stack = stack[2:]
+                success = False
+                break
             case _:
                 success = False
                 break
 
-
-
-                
-            
-        
-
-    return (success, stack, log)
+    return (success, stack, log, ret)
 
 def test():
     script_dirname = os.path.dirname(os.path.abspath(__file__))
@@ -380,12 +407,13 @@ def test():
             tx = test.get('tx')
             block = test.get('block')
             state = test.get('state')
-            (success, stack, log) = evm(code, tx, block, state)
+            (success, stack, log, ret) = evm(code, tx, block, state)
 
             expected_stack = [int(x, 16) for x in test['expect'].get('stack', [])]
             expected_log = test['expect'].get('logs', [])
+            expected_return = test['expect'].get("return", None)
             
-            if stack != expected_stack or success != test['expect']['success'] or expected_log != log:
+            if stack != expected_stack or success != test['expect']['success'] or expected_log != log or expected_return != ret:
                 print(f"❌ Test #{i + 1}/{total} {test['name']}")
                 if stack != expected_stack:
                     print("Stack doesn't match")
@@ -395,6 +423,10 @@ def test():
                     print("Log doesn't match")
                     print(" expected:", expected_log)
                     print("   actual:", log)
+                elif expected_return != ret:
+                    print("Return doesn't match")
+                    print(" expected:", expected_return)
+                    print("   actual:", ret)
                 else:
                     print("Success doesn't match")
                     print(" expected:", test['expect']['success'])

@@ -53,6 +53,7 @@ def evm(code, tx, block, state):
     log = []
     storage = dict()
     ret = None
+    lastRet = None
     
     while pc < len(code):
         op = code[pc]
@@ -246,6 +247,9 @@ def evm(code, tx, block, state):
                     else:
                         memory[destoffset + i] = 0
                 stack = stack[4:]
+            case evm_codes.RETURNDATASIZE:
+                a = len(lastRet)/2 if lastRet else 0
+                stack = [a] + stack
             case evm_codes.EXTCODEHASH:
                 addr = hex(stack[0])
                 if len(addr) < 22:
@@ -371,6 +375,7 @@ def evm(code, tx, block, state):
                 }
                 succ, _, llog, rr = evm(bytes.fromhex(state[address]['code']['bin']), new_tx, block, state)
                 rr = rr[:retSize * 2]
+                lastRet = rr
                 log += llog
                 memory = mstore(memory, int(rr, 16), retOffset, retSize)
                 

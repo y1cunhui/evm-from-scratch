@@ -339,6 +339,21 @@ def evm(code, tx, block, state):
             case x if x in range(evm_codes.SWAP1, evm_codes.SWAP16+1):
                 n = x - evm_codes.SWAP1 + 1
                 stack[0], stack[n] = stack[n], stack[0]
+            case x if x in range(evm_codes.LOG0, evm_codes.LOG4 + 1):
+                offset, size = stack[0], stack[1]
+                index = x - evm_codes.LOG0
+                topics = [hex(stack[2+i]) for i in range(index)]
+                stack = stack[2+index:]
+                data = ""
+                if len(memory) < pos + 32:
+                    memory += ([0] * (pos + 32 - len(memory)))
+                for i in range(size):
+                    data += hex(memory[offset + i])[2:]
+                log.append({
+                    "address": tx['to'],
+                    "data": data,
+                    "topics": topics
+                })
             case _:
                 success = False
                 break
@@ -376,6 +391,10 @@ def test():
                     print("Stack doesn't match")
                     print(" expected:", expected_stack)
                     print("   actual:", stack)
+                elif expected_log != log:
+                    print("Log doesn't match")
+                    print(" expected:", expected_log)
+                    print("   actual:", log)
                 else:
                     print("Success doesn't match")
                     print(" expected:", test['expect']['success'])

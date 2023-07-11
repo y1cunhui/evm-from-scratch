@@ -12,7 +12,10 @@
 
 import json
 import os
+from eth_hash.auto import keccak
 import evm_codes
+
+
 
 # helper functions
 def unsigned_to_signed(x):
@@ -29,10 +32,13 @@ def invalid_position(code, pc):
             return True
     return False
 
-def evm(code):
+def evm(code, tx, block, state):
     pc = 0
     success = True
     stack = []
+    memory = []
+    log = []
+    storage = dict()
     
     while pc < len(code):
         op = code[pc]
@@ -41,8 +47,6 @@ def evm(code):
         match op:
             case evm_codes.STOP:
                 break
-            case evm_codes.POP:
-                stack = stack[1:]
             case evm_codes.ADD:
                 stack = [stack[0] + stack[1]] + stack[2:]
                 if stack[0] > (2 ** 256) - 1:
@@ -142,6 +146,164 @@ def evm(code):
                 else:
                     num = stack[1] >> stack[0]
                 stack = [num] + stack[2:]
+            case evm_codes.SHA3:
+                offset, size = stack[0], stack[1]
+                val = 0
+                if len(memory) < offset + size:
+                    memory += ([0] * (pos + 32 - len(memory)))
+                for i in range(size):
+                    val <<= 8
+                    val += memory[offset + i]
+                
+                stack = [int.from_bytes(keccak(val.to_bytes(size, byteorder='big')), byteorder='big')] + stack[2:]
+            case evm_codes.ADDRESS:
+                stack = [int(tx['to'], 16)] + stack
+            case evm_codes.BALANCE:
+                addr = hex(stack[0])
+                if len(addr) < 22:
+                    addr = '0x' + '0'*(22 - len(addr)) + addr[2:]
+                if state is None or addr not in state or 'balance' not in state[addr]:
+                    stack[0] = 0
+                else:
+                    stack[0] = int(state[addr]['balance'], 16)
+            case evm_codes.ORIGIN:
+                stack = [int(tx['origin'], 16)] + stack
+            case evm_codes.CALLER:
+                stack = [int(tx['from'], 16)] + stack
+            case evm_codes.CALLVALUE:
+                stack = [int(tx['value'], 16)] + stack
+            case evm_codes.CALLDATALOAD:
+                pos = stack[0]
+                data = tx['data']
+                end = min(pos * 2 + 64, len(data))
+                data = data[pos * 2:end]
+                if len(data) < 64:
+                    data += ("0"*(64 - len(data)))
+                stack[0] = int(data, 16)
+            case evm_codes.CALLDATASIZE:
+                if tx is None:
+                    a = 0
+                else:
+                    a = len(tx.get('data', '')) / 2
+                stack = [a] + stack
+            case evm_codes.CALLDATACOPY:
+                destoffset, offset, size = stack[0], stack[1], stack[2]
+                if len(memory) < destoffset + size:
+                    memory += ([0] * (destoffset + size - len (memory)))
+                data = tx["data"]
+                for i in range(size):
+                    if (offset + i + 1) * 2 <= len(data):
+                        memory[destoffset + i] = int(data[(offset + i) * 2: (offset + i + 1) * 2], 16)
+                    else:
+                        memory[destoffset + i] = 0
+                stack = stack[3:]
+            case evm_codes.CODESIZE:
+                stack = [len(code)] + stack
+            case evm_codes.CODECOPY:
+                destoffset, offset, size = stack[0], stack[1], stack[2]
+                if len(memory) < destoffset + size:
+                    memory += ([0] * (destoffset + size - len (memory)))
+                data = code
+                for i in range(size):
+                    if (offset + i) <= len(data):
+                        memory[destoffset + i] = int.from_bytes(data[(offset + i): (offset + i + 1)], byteorder="big")
+                    else:
+                        memory[destoffset + i] = 0
+                stack = stack[3:]
+            case evm_codes.GASPRICE:
+                stack = [int(tx['gasprice'], 16)] + stack
+            case evm_codes.EXTCODESIZE:
+                addr = hex(stack[0])
+                if len(addr) < 22:
+                    addr = '0x' + '0'*(22 - len(addr)) + addr[2:]
+                if state is None or addr not in state or 'code' not in state[addr]:
+                    stack[0] = 0
+                else:
+                    stack[0] = len(state[addr]['code']['bin']) / 2
+            case evm_codes.EXTCODECOPY:
+                addr, destoffset, offset, size = hex(stack[0]), stack[1], stack[2], stack[3]
+                if len(addr) < 22:
+                    addr = '0x' + '0'*(22 - len(addr)) + addr[2:]
+                if state is None or addr not in state or 'code' not in state[addr]:
+                    extcode = b''
+                else:
+                    extcode = bytes.fromhex(state[addr]['code']['bin'])
+                if len(memory) < destoffset + size:
+                    memory += ([0] * (destoffset + size - len (memory)))
+                data = extcode
+                for i in range(size):
+                    if (offset + i) <= len(data):
+                        memory[destoffset + i] = int.from_bytes(data[(offset + i): (offset + i + 1)], byteorder="big")
+                    else:
+                        memory[destoffset + i] = 0
+                stack = stack[4:]
+            case evm_codes.EXTCODEHASH:
+                addr = hex(stack[0])
+                if len(addr) < 22:
+                    addr = '0x' + '0'*(22 - len(addr)) + addr[2:]
+                if state is None or addr not in state:
+                    a = 0
+                elif 'code' not in state[addr]:
+                    a = int.from_bytes(keccak(b''), byteorder='big')
+                else:
+                    extcode = bytes.fromhex(state[addr]['code']['bin'])
+                    a = int.from_bytes(keccak(extcode), byteorder='big')
+                stack[0] = a
+            case evm_codes.BLOCKHASH:
+                stack = [0] + stack[1:]
+            case evm_codes.COINBASE:
+                stack = [int(block['coinbase'], 16)] + stack
+            case evm_codes.TIMESTAMP:
+                stack = [int(block['timestamp'], 16)] + stack
+            case evm_codes.NUMBER:
+                stack = [int(block['number'], 16)] + stack
+            case evm_codes.DIFFICULTY:
+                stack = [int(block['difficulty'], 16)] + stack
+            case evm_codes.GASLIMIT:
+                stack = [int(block['gaslimit'], 16)] + stack
+            case evm_codes.CHAINID:
+                stack = [int(block['chainid'], 16)] + stack
+            case evm_codes.SELFBALANCE:
+                addr = tx["to"]
+                stack = [0] + stack
+                if state is None or addr not in state or 'balance' not in state[addr]:
+                    stack[0] = 0
+                else:
+                    stack[0] = int(state[addr]['balance'], 16)
+            case evm_codes.BASEFEE:
+                stack = [int(block['basefee'], 16)] + stack
+            case evm_codes.POP:
+                stack = stack[1:]
+            case evm_codes.MLOAD:
+                pos = stack[0]
+                val = 0
+                if len(memory) < pos + 32:
+                    memory += ([0] * (pos + 32 - len(memory)))
+                for i in range(32):
+                    val <<= 8
+                    val += memory[pos + i]
+                    
+                stack[0] = val
+            case evm_codes.MSTORE:
+                pos, val = stack[0], stack[1]
+                stack = stack[2:]
+                if len(memory) < pos + 32:
+                    memory += ([0] * (pos + 32 - len(memory)))
+                for i in range(32):
+                    memory[pos + 31 - i] = (val >> (i * 8)) & 0xFF
+            case evm_codes.MSTORE8:
+                pos, val = stack[0], stack[1] & 0xFF
+                stack = stack[2:]
+                if len(memory) <= pos:
+                    memory += ([0] * (pos +1 - len(memory)))
+                memory[pos] = val
+            case evm_codes.SLOAD:
+                k = stack[0]
+                stack[0] = storage.get(k, 0)
+            case evm_codes.SSTORE:
+                k, v = stack[0], stack[1]
+                storage[k] = v
+                stack = stack[2:]
             case evm_codes.JUMP:
                 pc = stack[0]
                 stack = stack[1:]
@@ -159,6 +321,8 @@ def evm(code):
                     stack = stack[2:]
             case evm_codes.PC:
                 stack = [pc - 1] + stack
+            case evm_codes.MSIZE:
+                stack = [(len(memory) // 32 + int(len(memory) % 32 > 0)) * 32] + stack
             case evm_codes.GAS:
                 stack = [0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff] + stack
             case evm_codes.JUMPDEST:
@@ -175,7 +339,7 @@ def evm(code):
             case x if x in range(evm_codes.SWAP1, evm_codes.SWAP16+1):
                 n = x - evm_codes.SWAP1 + 1
                 stack[0], stack[n] = stack[n], stack[0]
-            case evm_codes.INVALID:
+            case _:
                 success = False
                 break
 
@@ -185,7 +349,7 @@ def evm(code):
             
         
 
-    return (success, stack)
+    return (success, stack, log)
 
 def test():
     script_dirname = os.path.dirname(os.path.abspath(__file__))
@@ -198,11 +362,15 @@ def test():
             # Note: as the test cases get more complex, you'll need to modify this
             # to pass down more arguments to the evm function
             code = bytes.fromhex(test['code']['bin'])
-            (success, stack) = evm(code)
+            tx = test.get('tx')
+            block = test.get('block')
+            state = test.get('state')
+            (success, stack, log) = evm(code, tx, block, state)
 
-            expected_stack = [int(x, 16) for x in test['expect']['stack']]
+            expected_stack = [int(x, 16) for x in test['expect'].get('stack', [])]
+            expected_log = test['expect'].get('logs', [])
             
-            if stack != expected_stack or success != test['expect']['success']:
+            if stack != expected_stack or success != test['expect']['success'] or expected_log != log:
                 print(f"❌ Test #{i + 1}/{total} {test['name']}")
                 if stack != expected_stack:
                     print("Stack doesn't match")
